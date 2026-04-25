@@ -3,10 +3,11 @@ from gym.spaces import Box
 from gym.spaces import MultiDiscrete
 import numpy as np
 import pybullet as pb
+from .shape_primitives import BoxPrimitive, CylinderPrimitive, WhalePrimitive
 
 class PushingEnv(gym.Env):
 
-    def __init__(self, graphics = False, seed = None, fps = 30):
+    def __init__(self, graphics = False, seed = None, fps = 30, randomize_shapes = True, shapes = None):
         super(PushingEnv, self).__init__()
 
         # Number of previous observations to use in the policy
@@ -29,6 +30,11 @@ class PushingEnv(gym.Env):
 
         # Whether to apply random disturbances during training
         self.disturbances = True
+        
+        # Shape randomization settings
+        self.randomize_shapes = randomize_shapes
+        # Available shapes to randomly select from during training
+        self.available_shapes = shapes if shapes is not None else ['box', 'cylinder', 'whale']
 
 
         # Distance between pusher and ground
@@ -75,14 +81,18 @@ class PushingEnv(gym.Env):
         # Current success rate calculated over the past 100 episodes
         self.CURRENT_SUCCESS_RATE = 0
 
-        # Box that is being pushed
+        # Object that is being pushed
         self.box = None
-        # End effector that pushes the box
+        # End effector that pushes the object
         self.pusher = None
-        # Surface on which the box slides
+        # Surface on which the object slides
         self.floor = None
         # Visualization of target
         self.target_vis = None
+        # Shape primitive for the object being pushed
+        self.shape_object = None
+        # Type of shape to use ('box', 'cylinder', 'sphere', 'capsule')
+        self.shape_type = 'box'
 
         # x coordinate of the box at the starting pose
         self.start_x_box = None
@@ -118,16 +128,21 @@ class PushingEnv(gym.Env):
         self.RESTITUTION_WIDTH = 0.2
 
         self.BOX_Y_CENTER = 0.12
-        self.BOX_Y_WIDTH = 0.01
+        self.BOX_Y_WIDTH = 0.05  # Changed from 0.01 to 0.02 for wider variation (±0.01)
 
         self.BOX_X_CENTER = 0.1
-        self.BOX_X_WIDTH = 0.01
+        self.BOX_X_WIDTH = 0.05  # Changed from 0.01 to 0.02 for wider variation (±0.01)
 
         self.BOX_MASS_CENTER = 0.5
         self.BOX_MASS_WIDTH = 0.2
 
         self.PUSHER_RADIUS_CENTER = 0.0125
         self.PUSHER_RADIUS_WIDTH = 0.001
+
+        # Parameters for cylinder and sphere radius (for planar stability)
+        # Use dimensions comparable to box dimensions
+        self.SHAPE_RADIUS_CENTER = 0.05  # Average radius for cylinders and spheres
+        self.SHAPE_RADIUS_WIDTH = 0.05   # Variation in radius
 
         self.FORCE_WIDTH = 50
 
@@ -215,6 +230,10 @@ class PushingEnv(gym.Env):
         self.rng = np.random.default_rng(self.seed)
 
         self.step_num = 0
+        
+        # Randomly select shape if randomize_shapes is enabled
+        if self.randomize_shapes:
+            self.shape_type = self.rng.choice(self.available_shapes)
 
         # Remove the box, pusher, target and floor from the simulator
         if self.box != None:
@@ -228,10 +247,30 @@ class PushingEnv(gym.Env):
         else:
             self._create_floor()
 
-        # Generate random dimensions of the box
+        # Generate random dimensions based on shape type
+        # Initialize default dimensions that may be used by multiple shape types
         self.BOX_DIM_X = self.BOX_X_CENTER + self.rng.random()*self.BOX_X_WIDTH - self.BOX_X_WIDTH/2
         self.BOX_DIM_Y = self.BOX_Y_CENTER + self.rng.random()*self.BOX_Y_WIDTH - self.BOX_Y_WIDTH/2
-        self.BOX_RADIUS = self.BOX_DIM_X/2 # Inner radius (used to check if the box is inside the boundary)
+        
+        if self.shape_type == 'box':
+            box_mass = self.BOX_MASS_CENTER + self.rng.random()*self.BOX_MASS_WIDTH - self.BOX_MASS_WIDTH/2
+            friction = self.FRICTION_CENTER + self.rng.random()*self.FRICTION_WIDTH - self.FRICTION_WIDTH/2
+            restitution = self.RESTITUTION_CENTER + self.rng.random()*self.RESTITUTION_WIDTH - self.RESTITUTION_WIDTH/2
+            self.shape_object = BoxPrimitive(self.BOX_DIM_X, self.BOX_DIM_Y, self.BOX_DIM_Z, box_mass, friction, restitution)
+        elif self.shape_type == 'cylinder':
+            # Use SHAPE_RADIUS parameters for domain randomization
+            obj_radius = self.SHAPE_RADIUS_CENTER + self.rng.random()*self.SHAPE_RADIUS_WIDTH - self.SHAPE_RADIUS_WIDTH/2
+            box_mass = self.BOX_MASS_CENTER + self.rng.random()*self.BOX_MASS_WIDTH - self.BOX_MASS_WIDTH/2
+            friction = self.FRICTION_CENTER + self.rng.random()*self.FRICTION_WIDTH - self.FRICTION_WIDTH/2
+            restitution = self.RESTITUTION_CENTER + self.rng.random()*self.RESTITUTION_WIDTH - self.RESTITUTION_WIDTH/2
+            self.shape_object = CylinderPrimitive(obj_radius, self.BOX_DIM_Z, box_mass, friction, restitution)
+        elif self.shape_type == 'whale':
+            # Whale mesh with scale variation
+            whale_scale = 0.8 + self.rng.random() * 0.4  # Scale between 0.8 and 1.2
+            box_mass = self.BOX_MASS_CENTER + self.rng.random()*self.BOX_MASS_WIDTH - self.BOX_MASS_WIDTH/2
+            friction = self.FRICTION_CENTER + self.rng.random()*self.FRICTION_WIDTH - self.FRICTION_WIDTH/2
+            restitution = self.RESTITUTION_CENTER + self.rng.random()*self.RESTITUTION_WIDTH - self.RESTITUTION_WIDTH/2
+            self.shape_object = WhalePrimitive(scale=whale_scale, mass=box_mass, friction=friction, restitution=restitution)
 
         # Generate random dimensions of the pusher
         self.PUSHER_RADIUS = self.PUSHER_RADIUS_CENTER + self.rng.random()*self.PUSHER_RADIUS_WIDTH - self.PUSHER_RADIUS_WIDTH/2
@@ -245,7 +284,7 @@ class PushingEnv(gym.Env):
 
         # Generate a random starting configuration
         self.start_x_box, self.start_y_box, self.start_theta, pusher_x, pusher_y = self._generate_random_start()
-        self._create_box(x_start=self.start_x_box, y_start=self.start_y_box, theta_start=self.start_theta)
+        self._create_object(x_start=self.start_x_box, y_start=self.start_y_box, theta_start=self.start_theta)
         self._create_pusher(x_start=pusher_x, y_start=pusher_y)
         self.box_pose_stack = [[self.start_x_box, self.start_y_box, self.start_theta] for _ in range(self.STACK_SIZE)]
         self.pusher_pos_stack = [[pusher_x, pusher_y] for _ in range(self.STACK_SIZE)]
@@ -313,11 +352,20 @@ class PushingEnv(gym.Env):
         force_y = self.rng.random()*self.FORCE_WIDTH - self.FORCE_WIDTH/2
 
         # Generate random position at which to apply the force
-        pos_x = self.rng.random()*self.BOX_DIM_X - self.BOX_DIM_X/2
-        pos_y = self.rng.random()*self.BOX_DIM_Y - self.BOX_DIM_Y/2
-        pos_z = self.rng.random()*self.BOX_DIM_Z - self.BOX_DIM_Z/2
+        # For boxes, apply on faces; for cylinders/spheres, apply in x-y plane
+        if self.shape_type == 'box':
+            pos_x = self.rng.random()*self.BOX_DIM_X - self.BOX_DIM_X/2
+            pos_y = self.rng.random()*self.BOX_DIM_Y - self.BOX_DIM_Y/2
+            pos_z = self.rng.random()*self.BOX_DIM_Z - self.BOX_DIM_Z/2
+        else:
+            # For cylindrical shapes, apply force in x-y plane at random position
+            contact_radius = self.shape_object.get_contact_radius()
+            angle = self.rng.random() * 2 * np.pi
+            pos_x = contact_radius * np.cos(angle)
+            pos_y = contact_radius * np.sin(angle)
+            pos_z = 0
 
-        # Apply the force (direction and position relative to the box)
+        # Apply the force (direction and position relative to the object)
         pb.applyExternalForce(objectUniqueId = self.box, 
                               linkIndex = -1,
                               forceObj = [force_x, force_y, 0],
@@ -371,23 +419,32 @@ class PushingEnv(gym.Env):
             restitution = self.RESTITUTION_CENTER + self.rng.random()*self.RESTITUTION_WIDTH - self.RESTITUTION_WIDTH/2
         )
 
-    def _create_box(self, x_start, y_start, theta_start):
-        box_visual = pb.createVisualShape(shapeType = pb.GEOM_BOX, halfExtents = [self.BOX_DIM_X/2, self.BOX_DIM_Y/2, self.BOX_DIM_Z/2], rgbaColor = [1, 1, 0, 1])
-        box_collision = pb.createCollisionShape(shapeType = pb.GEOM_BOX, halfExtents = [self.BOX_DIM_X/2, self.BOX_DIM_Y/2, self.BOX_DIM_Z/2])
+    def _create_object(self, x_start, y_start, theta_start):
+        """Create the object to be pushed using the current shape_object definition."""
+        visual_shape_params = self.shape_object.get_visual_shape()
+        collision_shape_params = self.shape_object.get_collision_shape()
+        
+        box_visual = pb.createVisualShape(**visual_shape_params)
+        box_collision = pb.createCollisionShape(**collision_shape_params)
+        
+        # Apply z offset for mesh files
+        z_offset = self.shape_object.get_z_offset()
+        z_position = self.shape_object.height/2 + z_offset
+        
         self.box = pb.createMultiBody(
-            baseMass = self.BOX_MASS_CENTER + self.rng.random()*self.BOX_MASS_WIDTH - self.BOX_MASS_WIDTH/2,
+            baseMass = self.shape_object.mass,
             baseCollisionShapeIndex = box_collision,
             baseVisualShapeIndex = box_visual,
-            basePosition = [x_start, y_start, self.BOX_DIM_Z/2],
+            basePosition = [x_start, y_start, z_position],
             baseOrientation = pb.getQuaternionFromEuler([0, 0, theta_start])
         )
         pb.changeDynamics(
             bodyUniqueId = self.box,
             linkIndex = -1,
-            lateralFriction = self.FRICTION_CENTER + self.rng.random()*self.FRICTION_WIDTH - self.FRICTION_WIDTH/2,
+            lateralFriction = self.shape_object.friction,
             spinningFriction = 0,
             rollingFriction = 0,
-            restitution = self.RESTITUTION_CENTER + self.rng.random()*self.RESTITUTION_WIDTH - self.RESTITUTION_WIDTH/2
+            restitution = self.shape_object.restitution
         )
 
     def _create_pusher(self, x_start, y_start):
@@ -416,11 +473,12 @@ class PushingEnv(gym.Env):
         pb.addUserDebugLine(lineFromXYZ = [self.TABLE_DIM_X/2, -self.TABLE_DIM_Y/2, 0.01], lineToXYZ = [self.TABLE_DIM_X/2, self.TABLE_DIM_Y/2, 0.01], lineColorRGB = [0, 0, 0], lineWidth = 5)
 
     def _is_box_in_boundary(self):
-        # Checks if the box is within the table boundary.
+        # Checks if the object is within the table boundary.
         x_pos = self.sim_data["x_box"]
         y_pos = self.sim_data["y_box"]
+        contact_radius = self.shape_object.get_contact_radius()
 
-        return (x_pos >= -self.TABLE_DIM_X/2 + self.BOX_RADIUS) and (x_pos <= self.TABLE_DIM_X/2 - self.BOX_RADIUS) and (y_pos >= -self.TABLE_DIM_Y/2 + self.BOX_RADIUS) and (y_pos <= self.TABLE_DIM_Y/2 - self.BOX_RADIUS)
+        return (x_pos >= -self.TABLE_DIM_X/2 + contact_radius) and (x_pos <= self.TABLE_DIM_X/2 - contact_radius) and (y_pos >= -self.TABLE_DIM_Y/2 + contact_radius) and (y_pos <= self.TABLE_DIM_Y/2 - contact_radius)
 
     def _is_pusher_in_boundary(self):
         # Checks if the pusher is within the table boundary.
@@ -431,36 +489,18 @@ class PushingEnv(gym.Env):
 
     def _generate_random_start(self):
 
-        # Generate random starting position of the box (box_x, box_y)
+        # Generate random starting position of the object (box_x, box_y)
         box_x = self.rng.random()*self.GEN_POS_X_WIDTH - self.GEN_POS_X_WIDTH/2
         box_y = self.rng.random()*self.GEN_POS_Y_WIDTH - self.GEN_POS_Y_WIDTH/2
 
-        # Generate random starting orientation of the box (theta)
+        # Generate random starting orientation of the object (theta)
         theta = self.rng.random()*self.GEN_THETA_WIDTH - self.GEN_THETA_WIDTH / 2
 
         # Generate random starting position of the pusher (pusher_x, pusher_y).
-        box_side = self.rng.random()
-        if box_side <= 0.25:
-            # Back side
-            pusher_start_x = -self.BOX_DIM_X/2 - self.PUSHER_RADIUS - self.SPACE_PUSHER_BOX
-            pusher_start_y = self.rng.random()*self.BOX_DIM_Y - self.BOX_DIM_Y/2
-        elif box_side <= 0.5:
-            # Front side
-            pusher_start_x = self.BOX_DIM_X/2 + self.PUSHER_RADIUS + self.SPACE_PUSHER_BOX
-            pusher_start_y = self.rng.random()*self.BOX_DIM_Y - self.BOX_DIM_Y/2
-        elif box_side <= 0.75:
-            # Top side
-            pusher_start_x = self.rng.random()*self.BOX_DIM_X - self.BOX_DIM_X/2
-            pusher_start_y = self.BOX_DIM_Y/2 + self.PUSHER_RADIUS + self.SPACE_PUSHER_BOX
-        else:
-            # Botton side
-            pusher_start_x = self.rng.random()*self.BOX_DIM_X - self.BOX_DIM_X/2
-            pusher_start_y = -self.BOX_DIM_Y/2 - self.PUSHER_RADIUS - self.SPACE_PUSHER_BOX
-
-        pusher_start = np.array([pusher_start_x, pusher_start_y])
-        rotation_matrix = np.array([[np.cos(theta), -np.sin(theta)],[np.sin(theta), np.cos(theta)]])
-        pusher_rotated = rotation_matrix@pusher_start
-        pusher_x, pusher_y = pusher_rotated + np.array([box_x, box_y])
+        # Use shape-specific pusher placement logic
+        pusher_x, pusher_y = self.shape_object.get_random_pusher_position(
+            box_x, box_y, theta, self.PUSHER_RADIUS, self.SPACE_PUSHER_BOX, self.rng
+        )
 
         return box_x, box_y, theta, pusher_x, pusher_y
 
@@ -469,14 +509,28 @@ class PushingEnv(gym.Env):
         target_y = self.rng.random()*self.GEN_POS_Y_WIDTH - self.GEN_POS_Y_WIDTH/2
         target_theta = self.rng.random()*self.GEN_THETA_WIDTH - self.GEN_THETA_WIDTH / 2
 
-        # Visualize target
+        # Visualize target using the same shape as the object
         if self.graphics:
-            target_visual = pb.createVisualShape(shapeType = pb.GEOM_BOX, halfExtents = [self.BOX_DIM_X/2, self.BOX_DIM_Y/2, self.BOX_DIM_Z/2], rgbaColor = [0, 1, 0, 0.5])
+            target_visual_params = self.shape_object.get_visual_shape(color=[0, 1, 0, 0.5])
+            target_visual = pb.createVisualShape(**target_visual_params)
+            # Apply z offset for mesh files
+            z_offset = self.shape_object.get_z_offset()
+            z_position = self.shape_object.height/2 + z_offset
             self.target_vis = pb.createMultiBody(
                 baseMass = 0,
                 baseVisualShapeIndex = target_visual,
-                basePosition = [target_x, target_y, self.BOX_DIM_Z/2],
+                basePosition = [target_x, target_y, z_position],
                 baseOrientation = pb.getQuaternionFromEuler([0, 0, target_theta])
+            )
+            
+            # Draw orientation arrow for the target (blue arrow)
+            arrow_length = self.shape_object.get_contact_radius() + 0.02
+            end_x = target_x + arrow_length * np.cos(target_theta)
+            end_y = target_y + arrow_length * np.sin(target_theta)
+            pb.addUserDebugLine(
+                lineFromXYZ=[target_x, target_y, z_position + 0.01],
+                lineToXYZ=[end_x, end_y, z_position + 0.01],
+                lineColorRGB=[0, 0, 1],  # Blue for target orientation
             )
 
         return target_x, target_y, target_theta

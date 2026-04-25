@@ -13,14 +13,18 @@ clip_range = 0.2
 epochs = 10
 sde = False
 target_kl = 0.01
-batch_size = 7680
+batch_size = 960
 horizon = 300
 learning_rate = 0.0003
-n_envs = 128
+n_envs = 16
 
-model_name = "ppo_lstm_categorical_part_1"
+# Set to True to load a pre-trained model for fine-tuning
+load_pretrained = True
+pretrained_model_path = "pushing-multimodal/run_policies/policies/ppo_lstm_categorical"
 
-env = make_vec_env(PushingEnv, n_envs=n_envs, vec_env_cls=SubprocVecEnv, vec_env_kwargs=dict(start_method='fork'))
+model_name = "ppo_lstm_categorical_variable_shape_part_1"
+
+env = make_vec_env(PushingEnv, n_envs=n_envs, vec_env_cls=SubprocVecEnv, env_kwargs=dict(graphics=False), vec_env_kwargs=dict(start_method='fork'))
 
 checkpoint_callback = CheckpointCallback(
     save_freq=78_125,
@@ -29,7 +33,7 @@ checkpoint_callback = CheckpointCallback(
 )
 
 class CurriculumCallback(BaseCallback):
-    def __init__(self, verbose=0):
+    def __init__(self, verbose=1):
         super().__init__(verbose)
         self.already_halfed = False
 
@@ -51,23 +55,36 @@ class CustomMlpFeatureExtractor(BaseFeaturesExtractor):
     def forward(self, observations):
         return self.mlp(observations)
 
-model = RecurrentPPO(
-    policy="MlpLstmPolicy",
-    env = env,
-    learning_rate=learning_rate,
-    n_steps=horizon,
-    batch_size=batch_size,
-    n_epochs=epochs,
-    clip_range=clip_range,
-    use_sde=sde,
-    target_kl=target_kl,
-    verbose=0, 
-    tensorboard_log=f"./tensorboard/",
-    policy_kwargs=dict(features_extractor_class = CustomMlpFeatureExtractor,
-                       share_features_extractor = False,    
-                       lstm_hidden_size = 256, 
-                       n_lstm_layers = 1,
-                       net_arch = dict(pi = [128], vf = [128])))
+if load_pretrained:
+    # Load pre-trained model for fine-tuning
+    model = RecurrentPPO.load(
+        pretrained_model_path,
+        env=env,
+        learning_rate=learning_rate,
+        clip_range=clip_range,
+        target_kl=target_kl,
+        verbose=0
+    )
+    print(f"Loaded pre-trained model from {pretrained_model_path}")
+else:
+    # Create new model from scratch
+    model = RecurrentPPO(
+        policy="MlpLstmPolicy",
+        env = env,
+        learning_rate=learning_rate,
+        n_steps=horizon,
+        batch_size=batch_size,
+        n_epochs=epochs,
+        clip_range=clip_range,
+        use_sde=sde,
+        target_kl=target_kl,
+        verbose=0, 
+        tensorboard_log=f"./tensorboard/",
+        policy_kwargs=dict(features_extractor_class = CustomMlpFeatureExtractor,
+                           share_features_extractor = False,    
+                           lstm_hidden_size = 256, 
+                           n_lstm_layers = 1,
+                           net_arch = dict(pi = [128], vf = [128])))
   
 model.learn(
     total_timesteps=4e9,
